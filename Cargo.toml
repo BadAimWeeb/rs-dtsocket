@@ -1,0 +1,8 @@
+[package]
+name = "rs-dtsocket"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.71"
+
+[dependencies]
+rs-protov2d = { git = "https://github.com/BadAimWeeb/rs-protov2d" }

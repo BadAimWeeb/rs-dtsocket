@@ -1,0 +1,24 @@
+on: [push, pull_request]
+
+name: Test
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust:
+          - stable
+          - 1.71.0
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+      - name: Check cargo version
+        run: cargo --version
+      - name: Run cargo test
+        run: cargo test --lib --tests
