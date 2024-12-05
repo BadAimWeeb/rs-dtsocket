@@ -1,4 +1,4 @@
-# rs-protov2d
+# rs-dtsocket
 
 > ⚠️ This package is in a VERY EARLY stage of development and IS NOT USABLE.
 
