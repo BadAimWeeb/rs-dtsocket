@@ -1,6 +1,6 @@
-use futures_util::{stream::FusedStream, FutureExt, Sink, SinkExt, Stream, StreamExt, task::Poll::{Ready, Pending}};
+use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, task::Poll::{Ready, Pending}};
 use std::{
-    collections::{HashMap, HashSet, LinkedList},
+    collections::{HashSet, LinkedList},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -35,7 +35,7 @@ impl Stream for DTSocketClient {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         loop {
-            match (self.protov2d.next().poll_unpin(cx)) {
+            match self.protov2d.next().poll_unpin(cx) {
                 Ready(t) => {
                     match t {
                         Some(msg) => {
@@ -43,28 +43,32 @@ impl Stream for DTSocketClient {
                                 continue;
                             }
         
-                            let data = msg.data;
-                            let t = data[0];
-                            let mut data = &data[1..];
+                            let mut data = &msg.data[..];
+                            let data = rmpv::decode::read_value(&mut data);
+                            if data.is_err() {
+                                continue;
+                            }
+                            let data = data.unwrap();
+                            let data = data.as_array();
+                            if data.is_none() {
+                                continue;
+                            }
+                            let data = data.unwrap();
+
+                            let t = data[0].as_u64();
+                            if t.is_none() {
+                                continue;
+                            }
+                            let t = t.unwrap();
+
                             match t {
                                 0 => {
                                     // handle packet type 0
-                                    let d = rmpv::decode::read_value(&mut data);
-                                    if d.is_err() {
+                                    if data.len() != 4 {
                                         continue;
                                     }
         
-                                    let d = d.unwrap();
-                                    let d = d.as_array();
-                                    if d.is_none() {
-                                        continue;
-                                    }
-                                    let d = d.unwrap();
-                                    if d.len() != 3 {
-                                        continue;
-                                    }
-        
-                                    let nonce = d[0].as_u64();
+                                    let nonce = data[1].as_u64();
                                     if nonce.is_none() {
                                         continue;
                                     }
@@ -75,18 +79,18 @@ impl Stream for DTSocketClient {
                                     }
                                     self.t0_register.remove(&nonce);
         
-                                    let success = d[1].as_bool();
+                                    let success = data[2].as_bool();
                                     if success.is_none() {
                                         continue;
                                     }
                                     let success = success.unwrap();
         
                                     let mut v: Vec<u8> = Vec::new();
-                                    let result = rmpv::encode::write_value(&mut v, &d[2]);
+                                    let result = rmpv::encode::write_value(&mut v, &data[3]);
                                     if result.is_err() {
                                         continue;
                                     }
-        
+
                                     return Poll::Ready(Some(DTPacketType::Type0 { nonce, success, data: v }));
                                 }
         
@@ -124,23 +128,10 @@ impl DTSocketClient {
         }
     }
 
-    pub async fn call_procedure<'a, O, I>(&mut self, procedure: &str, data: I) -> Result<O, String>
+    async fn call_procedure_wait<O>(&mut self, nonce: u64) -> Result<O, String>
     where
-        I: serde::Serialize,
-        O: serde::de::DeserializeOwned,
+        O: serde::de::DeserializeOwned
     {
-        let nonce = self.nonce_counter;
-        self.nonce_counter += 1;
-
-        let serialized = rmp_serde::encode::to_vec(&(0, nonce, procedure, &data));
-        if serialized.is_err() {
-            return Err("internal_client_error: failed to serialize data".to_string());
-        }
-
-        let serialized = serialized.unwrap();
-
-        let _ = self.protov2d.send_packet(1, serialized).await;
-
         self.t0_register.insert(nonce);
         let r_packet;
         loop {
@@ -181,5 +172,44 @@ impl DTSocketClient {
         }
 
         Ok(result.unwrap())
+    }   
+
+    pub async fn call_procedure<O, I>(&mut self, procedure: &str, data: I) -> Result<O, String>
+    where
+        I: serde::Serialize,
+        O: serde::de::DeserializeOwned,
+    {
+        let nonce = self.nonce_counter;
+        self.nonce_counter += 1;
+
+        let serialized = rmp_serde::encode::to_vec(&(0, nonce, procedure, &data));
+        if serialized.is_err() {
+            return Err("internal_client_error: failed to serialize data".to_string());
+        }
+
+        let serialized = serialized.unwrap();
+
+        let _ = self.protov2d.send_packet(1, serialized).await;
+
+        self.call_procedure_wait(nonce).await
+    }
+
+    pub async fn call_procedure_void_input<O>(&mut self, procedure: &str) -> Result<O, String>
+    where 
+        O: serde::de::DeserializeOwned
+    {
+        let nonce = self.nonce_counter;
+        self.nonce_counter += 1;
+
+        let serialized = rmp_serde::encode::to_vec(&(0, nonce, procedure));
+        if serialized.is_err() {
+            return Err("internal_client_error: failed to serialize data".to_string());
+        }
+
+        let serialized = serialized.unwrap();
+
+        let _ = self.protov2d.send_packet(1, serialized).await;
+
+        self.call_procedure_wait(nonce).await
     }
 }

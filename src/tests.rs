@@ -1,7 +1,6 @@
 use std::{process::exit, sync::Arc};
 
 use client::DTSocketClient;
-use futures_util::{StreamExt as _};
 use rs_protov2d::client::{ClientHandshakeConfig, PublicKey, PublicKeyType};
 use async_mutex::Mutex;
 
@@ -36,12 +35,11 @@ async fn connect() {
 
     let dt = DTSocketClient::new(client);
     let rc = Arc::new(Mutex::new(dt));
-    let rc2 = rc.clone();
 
     let t = tokio::spawn(async move {
         let mut dt = rc.lock().await;
         println!("locked lol");
-        let response = dt.call_procedure("serverVersion", 0);
+        let response = dt.call_procedure_void_input("serverVersion");
         let response: Result<VersionDeserialize, _> = response.await;
 
         if response.is_err() {
@@ -51,13 +49,6 @@ async fn connect() {
 
         let response = response.unwrap();
         println!("BAW#ID server version is {} ({}@{})", response.version, response.branch, response.commit);
-    });
-
-    tokio::spawn(async move {
-        loop {
-            let mut dt = rc2.lock().await;
-            let _ = dt.next().await;
-        }
     });
 
     t.await.unwrap();
