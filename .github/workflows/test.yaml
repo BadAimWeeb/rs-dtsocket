@@ -21,4 +21,4 @@ jobs:
       - name: Check cargo version
         run: cargo --version
       - name: Run cargo test
-        run: cargo test --lib --tests
+        run: cargo test --lib --tests -- --nocapture

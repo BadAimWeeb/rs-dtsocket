@@ -31,14 +31,12 @@ async fn connect() {
     }
 
     let client = result.unwrap();
-    println!("connected to BAW#ID backend");
 
     let dt = DTSocketClient::new(client);
     let rc = Arc::new(Mutex::new(dt));
 
     let t = tokio::spawn(async move {
         let mut dt = rc.lock().await;
-        println!("locked lol");
         let response = dt.call_procedure_void_input("serverVersion");
         let response: Result<VersionDeserialize, _> = response.await;
 
