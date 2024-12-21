@@ -1,30 +1,37 @@
-use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, task::Poll::{Ready, Pending}};
+use futures_util::{
+    task::Poll::{Pending, Ready},
+    FutureExt, Stream, StreamExt
+};
 use std::{
-    collections::{HashSet, LinkedList},
+    collections::{HashMap, HashSet, LinkedList},
     pin::Pin,
     task::{Context, Poll},
 };
+use tokio_stream::wrappers::BroadcastStream;
 
 pub struct DTSocketClient {
     protov2d: rs_protov2d::client::Client,
 
-    nonce_counter: u64,
+    t0_nonce_counter: u64,
+    t2_nonce_recv_counter: HashMap<String, u64>,
+    t2_nonce_data_storage: HashMap<(String, u64), Vec<u8>>,
+    t2_broadcast_sender: HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>,
 
     t0_register: HashSet<u64>,
-    backfeed: LinkedList<DTPacketType>
+    backfeed: LinkedList<DTPacketType>,
 }
 
 pub enum DTPacketType {
     Type0 {
         nonce: u64,
         success: bool,
-        data: Vec<u8>
-    }
+        data: Vec<u8>,
+    },
 }
 
 pub struct DTPacket {
     pub packet_type: DTPacketType,
-    pub data: Vec<u8>
+    pub data: Vec<u8>,
 }
 
 impl Stream for DTSocketClient {
@@ -42,7 +49,7 @@ impl Stream for DTSocketClient {
                             if msg.qos != 1 {
                                 continue;
                             }
-        
+
                             let mut data = &msg.data[..];
                             let data = rmpv::decode::read_value(&mut data);
                             if data.is_err() {
@@ -67,45 +74,117 @@ impl Stream for DTSocketClient {
                                     if data.len() != 4 {
                                         continue;
                                     }
-        
+
                                     let nonce = data[1].as_u64();
                                     if nonce.is_none() {
                                         continue;
                                     }
                                     let nonce = nonce.unwrap();
-                                    
+
                                     if !self.t0_register.contains(&nonce) {
                                         continue;
                                     }
                                     self.t0_register.remove(&nonce);
-        
+
                                     let success = data[2].as_bool();
                                     if success.is_none() {
                                         continue;
                                     }
                                     let success = success.unwrap();
-        
+
                                     let mut v: Vec<u8> = Vec::new();
                                     let result = rmpv::encode::write_value(&mut v, &data[3]);
                                     if result.is_err() {
                                         continue;
                                     }
 
-                                    return Poll::Ready(Some(DTPacketType::Type0 { nonce, success, data: v }));
+                                    return Poll::Ready(Some(DTPacketType::Type0 {
+                                        nonce,
+                                        success,
+                                        data: v,
+                                    }));
                                 }
-        
+
+                                2 => {
+                                    // handle packet type 2
+                                    if data.len() < 3 {
+                                        continue;
+                                    }
+
+                                    let event = data[1].as_str();
+                                    if event.is_none() {
+                                        continue;
+                                    }
+                                    let event = event.unwrap().to_string();
+
+                                    let nonce = data[2].as_u64();
+                                    if nonce.is_none() {
+                                        continue;
+                                    }
+                                    let nonce = nonce.unwrap();
+
+                                    let mut v: Vec<u8> = Vec::new();
+                                    let slice = &data[2..];
+                                    let result = rmpv::encode::write_value(
+                                        &mut v,
+                                        &rmpv::Value::Array(slice.to_vec()),
+                                    );
+                                    if result.is_err() {
+                                        continue;
+                                    }
+
+                                    if !self.t2_nonce_recv_counter.contains_key(&event) {
+                                        self.t2_nonce_recv_counter.insert(event.clone(), 0);
+                                    }
+                                    self.create_broadcast_channel_if_not_exist(event.as_str());
+
+                                    let sender =
+                                        self.t2_broadcast_sender.get(&event).unwrap().clone();
+
+                                    let counter = *self.t2_nonce_recv_counter.get(&event).unwrap();
+
+                                    if nonce == counter {
+                                        let _ = sender.send(v);
+
+                                        let mut loop_counter = counter + 1;
+                                        loop {
+                                            if self
+                                                .t2_nonce_data_storage
+                                                .contains_key(&(event.clone(), loop_counter))
+                                            {
+                                                let v = self
+                                                    .t2_nonce_data_storage
+                                                    .remove(&(event.clone(), loop_counter))
+                                                    .unwrap();
+                                                let _ = sender.send(v);
+                                                loop_counter += 1;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+
+                                        self.t2_nonce_recv_counter
+                                            .insert(event.clone(), loop_counter);
+                                    } else {
+                                        self.t2_nonce_data_storage
+                                            .insert((event.clone(), nonce), v);
+                                    }
+
+                                    continue;
+                                }
+
                                 _ => {
                                     continue;
                                 }
                             }
                         }
-                        
+
                         None => {
                             return Poll::Ready(None);
                         }
                     }
                 }
-                
+
                 Pending => {
                     if !self.backfeed.is_empty() {
                         return Poll::Ready(Some(self.backfeed.pop_front().unwrap()));
@@ -122,15 +201,27 @@ impl DTSocketClient {
     pub fn new(protov2d: rs_protov2d::client::Client) -> Self {
         Self {
             protov2d,
-            nonce_counter: 0,
+            t0_nonce_counter: 0,
             t0_register: HashSet::new(),
-            backfeed: LinkedList::new()
+            t2_nonce_recv_counter: HashMap::new(),
+            t2_nonce_data_storage: HashMap::new(),
+            t2_broadcast_sender: HashMap::new(),
+            backfeed: LinkedList::new(),
         }
+    }
+
+    fn create_broadcast_channel_if_not_exist(&mut self, event: &str) {
+        if self.t2_broadcast_sender.contains_key(event) {
+            return;
+        }
+
+        let (tx, _) = tokio::sync::broadcast::channel(100);
+        self.t2_broadcast_sender.insert(event.to_string(), tx);
     }
 
     async fn call_procedure_wait<O>(&mut self, nonce: u64) -> Result<O, String>
     where
-        O: serde::de::DeserializeOwned
+        O: serde::de::DeserializeOwned,
     {
         self.t0_register.insert(nonce);
         let r_packet;
@@ -139,18 +230,26 @@ impl DTSocketClient {
             if packet.is_some() {
                 let up = packet.unwrap();
                 match up {
-                    DTPacketType::Type0 { nonce: p_nonce, success, data } => {
+                    DTPacketType::Type0 {
+                        nonce: p_nonce,
+                        success,
+                        data,
+                    } => {
                         if nonce != p_nonce {
-                            self.backfeed.push_back(DTPacketType::Type0 { nonce: p_nonce, success, data });
+                            self.backfeed.push_back(DTPacketType::Type0 {
+                                nonce: p_nonce,
+                                success,
+                                data,
+                            });
                             continue;
                         }
 
                         r_packet = (success, data);
                         break;
                     }
-                    _ => {
-                        self.backfeed.push_back(up);
-                    }
+                    // _ => {
+                    //     self.backfeed.push_back(up);
+                    // }
                 }
             }
 
@@ -172,15 +271,15 @@ impl DTSocketClient {
         }
 
         Ok(result.unwrap())
-    }   
+    }
 
     pub async fn call_procedure<O, I>(&mut self, procedure: &str, data: I) -> Result<O, String>
     where
         I: serde::Serialize,
         O: serde::de::DeserializeOwned,
     {
-        let nonce = self.nonce_counter;
-        self.nonce_counter += 1;
+        let nonce = self.t0_nonce_counter;
+        self.t0_nonce_counter += 1;
 
         let serialized = rmp_serde::encode::to_vec(&(0, nonce, procedure, &data));
         if serialized.is_err() {
@@ -195,11 +294,11 @@ impl DTSocketClient {
     }
 
     pub async fn call_procedure_void_input<O>(&mut self, procedure: &str) -> Result<O, String>
-    where 
-        O: serde::de::DeserializeOwned
+    where
+        O: serde::de::DeserializeOwned,
     {
-        let nonce = self.nonce_counter;
-        self.nonce_counter += 1;
+        let nonce = self.t0_nonce_counter;
+        self.t0_nonce_counter += 1;
 
         let serialized = rmp_serde::encode::to_vec(&(0, nonce, procedure));
         if serialized.is_err() {
@@ -211,5 +310,57 @@ impl DTSocketClient {
         let _ = self.protov2d.send_packet(1, serialized).await;
 
         self.call_procedure_wait(nonce).await
+    }
+
+    pub fn hook_event<T>(&mut self, event: &str) -> DTSocketClientEventReceiverStream<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.create_broadcast_channel_if_not_exist(event);
+        let rec = self.t2_broadcast_sender.get_mut(event).unwrap().subscribe();
+
+        DTSocketClientEventReceiverStream {
+            receiver: Box::new(BroadcastStream::new(rec)),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+pub struct DTSocketClientEventReceiverStream<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    receiver: Box<BroadcastStream<Vec<u8>>>,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> Unpin for DTSocketClientEventReceiverStream<T> where T: serde::de::DeserializeOwned {}
+
+impl<T> Stream for DTSocketClientEventReceiverStream<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    type Item = T;
+
+    fn poll_next(
+        mut self: Pin<&mut DTSocketClientEventReceiverStream<T>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        match futures_util::ready!(self.receiver.next().poll_unpin(cx)) {
+            Some(data) => {
+                if data.is_err() {
+                    return Poll::Ready(None);
+                }
+
+                let result: Result<T, _> = rmp_serde::from_slice(&data.unwrap());
+                if result.is_err() {
+                    return Poll::Ready(None);
+                }
+
+                Poll::Ready(Some(result.unwrap()))
+            }
+
+            None => Poll::Ready(None),
+        }
     }
 }
