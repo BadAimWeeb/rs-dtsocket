@@ -320,8 +320,22 @@ impl DTSocketClient {
         let rec = self.t2_broadcast_sender.get_mut(event).unwrap().subscribe();
 
         DTSocketClientEventReceiverStream {
+            dt: self,
             receiver: Box::new(BroadcastStream::new(rec)),
             _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn poll_keep_alive(&mut self) {
+        let waker = futures::task::noop_waker_ref();
+        let mut cx = std::task::Context::from_waker(waker);
+
+        let d = self.poll_next_unpin(&mut cx);
+        match d {
+            Ready(Some(d)) => {
+                self.backfeed.push_back(d);
+            }
+            _ => {}
         }
     }
 }
@@ -330,6 +344,7 @@ pub struct DTSocketClientEventReceiverStream<T>
 where
     T: serde::de::DeserializeOwned,
 {
+    dt: *mut DTSocketClient,
     receiver: Box<BroadcastStream<Vec<u8>>>,
     _marker: std::marker::PhantomData<T>,
 }
@@ -346,6 +361,16 @@ where
         mut self: Pin<&mut DTSocketClientEventReceiverStream<T>>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        // i know what i'm doing
+        unsafe {
+            match self.dt.as_mut() {
+                Some(dt) => {
+                    dt.poll_keep_alive();
+                }
+                None => {}
+            }
+        }
+
         match futures_util::ready!(self.receiver.next().poll_unpin(cx)) {
             Some(data) => {
                 if data.is_err() {
