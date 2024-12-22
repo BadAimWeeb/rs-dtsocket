@@ -357,6 +357,10 @@ where
             }
         }
     }
+
+    pub async fn try_reconnect_protov2d(&mut self) -> Result<bool, rs_protov2d::client::Error> {
+        self.protov2d.try_reconnect().await
+    }
 }
 
 pub struct DTSocketClientEventReceiverStream<T, R>
