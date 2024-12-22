@@ -259,7 +259,7 @@ impl DTSocketClient {
         if !r_packet.0 {
             let err: Result<String, _> = rmp_serde::from_slice(&r_packet.1);
             if err.is_err() {
-                return Err("internal_client_error: failed to deserialize".to_string());
+                return Err("internal_client_error: failed to deserialize error".to_string());
             }
 
             return Err(err.unwrap());
@@ -267,7 +267,7 @@ impl DTSocketClient {
 
         let result: Result<O, _> = rmp_serde::from_slice(&r_packet.1);
         if result.is_err() {
-            return Err("internal_client_error: failed to deserialize".to_string());
+            return Err("internal_client_error: failed to deserialize result".to_string());
         }
 
         Ok(result.unwrap())
