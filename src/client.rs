@@ -263,7 +263,10 @@ where
                 }
             }
 
-            panic!("failure");
+            let new_connect = self.protov2d.try_reconnect().await.map_err(|_| "internal_client_error: reconnect failed")?;
+            if new_connect {
+                return Err("internal_client_error: old connection closed".to_string());
+            }
         }
 
         if !r_packet.0 {
@@ -336,7 +339,7 @@ where
         }
     }
 
-    pub fn poll_keep_alive(&mut self) {
+    pub fn poll_keep_alive(&mut self) -> bool {
         let waker = futures::task::noop_waker_ref();
         let mut cx = std::task::Context::from_waker(waker);
 
@@ -344,8 +347,14 @@ where
         match d {
             Ready(Some(d)) => {
                 self.backfeed.push_back(d);
+                false
             }
-            _ => {}
+            Ready(None) => {
+                true
+            }
+            _ => {
+                false
+            }
         }
     }
 }
@@ -377,11 +386,14 @@ where
         mut self: Pin<&mut DTSocketClientEventReceiverStream<T, R>>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        // i know what i'm doing
+        // i know what i'm doing (sort of)
         unsafe {
             match self.dt.as_mut() {
                 Some(dt) => {
-                    dt.poll_keep_alive();
+                    let should_reconnect = dt.poll_keep_alive();
+                    if should_reconnect {
+                        return Poll::Ready(None);
+                    }
                 }
                 None => {}
             }
