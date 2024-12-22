@@ -2,6 +2,7 @@ use futures_util::{
     task::Poll::{Pending, Ready},
     FutureExt, Stream, StreamExt
 };
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use std::{
     collections::{HashMap, HashSet, LinkedList},
     pin::Pin,
@@ -9,8 +10,11 @@ use std::{
 };
 use tokio_stream::wrappers::BroadcastStream;
 
-pub struct DTSocketClient {
-    protov2d: rs_protov2d::client::Client,
+pub struct DTSocketClient<R>
+where
+    R: IntoClientRequest + Unpin + Copy
+{
+    protov2d: rs_protov2d::client::Client<R>,
 
     t0_nonce_counter: u64,
     t2_nonce_recv_counter: HashMap<String, u64>,
@@ -34,11 +38,14 @@ pub struct DTPacket {
     pub data: Vec<u8>,
 }
 
-impl Stream for DTSocketClient {
+impl<R> Stream for DTSocketClient<R> 
+where
+    R: IntoClientRequest + Unpin + Copy
+{
     type Item = DTPacketType;
 
     fn poll_next(
-        mut self: Pin<&mut DTSocketClient>,
+        mut self: Pin<&mut DTSocketClient<R>>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         loop {
@@ -197,8 +204,11 @@ impl Stream for DTSocketClient {
     }
 }
 
-impl DTSocketClient {
-    pub fn new(protov2d: rs_protov2d::client::Client) -> Self {
+impl<R> DTSocketClient<R>
+where 
+    R: IntoClientRequest + Unpin + Copy
+{
+    pub fn new(protov2d: rs_protov2d::client::Client<R>) -> Self {
         Self {
             protov2d,
             t0_nonce_counter: 0,
@@ -312,7 +322,7 @@ impl DTSocketClient {
         self.call_procedure_wait(nonce).await
     }
 
-    pub fn hook_event<T>(&mut self, event: &str) -> DTSocketClientEventReceiverStream<T>
+    pub fn hook_event<T>(&mut self, event: &str) -> DTSocketClientEventReceiverStream<T, R>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -340,25 +350,31 @@ impl DTSocketClient {
     }
 }
 
-pub struct DTSocketClientEventReceiverStream<T>
+pub struct DTSocketClientEventReceiverStream<T, R>
 where
     T: serde::de::DeserializeOwned,
+    R: IntoClientRequest + Unpin + Copy
 {
-    dt: *mut DTSocketClient,
+    dt: *mut DTSocketClient<R>,
     receiver: Box<BroadcastStream<Vec<u8>>>,
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<T> Unpin for DTSocketClientEventReceiverStream<T> where T: serde::de::DeserializeOwned {}
+impl<T, R> Unpin for DTSocketClientEventReceiverStream<T, R> 
+where 
+    T: serde::de::DeserializeOwned,
+    R: IntoClientRequest + Unpin + Copy
+{}
 
-impl<T> Stream for DTSocketClientEventReceiverStream<T>
+impl<T, R> Stream for DTSocketClientEventReceiverStream<T, R>
 where
     T: serde::de::DeserializeOwned,
+    R: IntoClientRequest + Unpin + Copy
 {
     type Item = T;
 
     fn poll_next(
-        mut self: Pin<&mut DTSocketClientEventReceiverStream<T>>,
+        mut self: Pin<&mut DTSocketClientEventReceiverStream<T, R>>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         // i know what i'm doing
