@@ -1,18 +1,19 @@
 use futures_util::{
     task::Poll::{Pending, Ready},
-    FutureExt, Stream, StreamExt
+    FutureExt, Stream, StreamExt,
 };
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio::time::sleep;
 use std::{
     collections::{HashMap, HashSet, LinkedList},
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll}, time::Duration,
 };
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 pub struct DTSocketClient<R>
 where
-    R: IntoClientRequest + Unpin + Copy
+    R: IntoClientRequest + Unpin + Copy,
 {
     protov2d: rs_protov2d::client::Client<R>,
 
@@ -38,9 +39,9 @@ pub struct DTPacket {
     pub data: Vec<u8>,
 }
 
-impl<R> Stream for DTSocketClient<R> 
+impl<R> Stream for DTSocketClient<R>
 where
-    R: IntoClientRequest + Unpin + Copy
+    R: IntoClientRequest + Unpin + Copy,
 {
     type Item = DTPacketType;
 
@@ -205,8 +206,8 @@ where
 }
 
 impl<R> DTSocketClient<R>
-where 
-    R: IntoClientRequest + Unpin + Copy
+where
+    R: IntoClientRequest + Unpin + Copy,
 {
     pub fn new(protov2d: rs_protov2d::client::Client<R>) -> Self {
         Self {
@@ -256,16 +257,26 @@ where
 
                         r_packet = (success, data);
                         break;
-                    }
-                    // _ => {
-                    //     self.backfeed.push_back(up);
-                    // }
+                    } // _ => {
+                      //     self.backfeed.push_back(up);
+                      // }
                 }
             }
 
-            let new_connect = self.protov2d.try_reconnect().await.map_err(|_| "internal_client_error: reconnect failed")?;
-            if new_connect {
-                return Err("internal_client_error: old connection closed".to_string());
+            loop {
+                let new_connect = self
+                    .protov2d
+                    .try_reconnect()
+                    .await;
+
+                if new_connect.is_err() {
+                    sleep(Duration::from_millis(5000)).await;
+                    continue;
+                }
+
+                if new_connect.unwrap() {
+                    return Err("internal_client_error: old connection closed".to_string());
+                }
             }
         }
 
@@ -349,16 +360,25 @@ where
                 self.backfeed.push_back(d);
                 false
             }
-            Ready(None) => {
-                true
-            }
-            _ => {
-                false
-            }
+            Ready(None) => true,
+            _ => false,
         }
     }
 
-    pub async fn try_reconnect_protov2d(&mut self) -> Result<bool, rs_protov2d::client::Error> {
+    pub async fn try_reconnect_protov2d(&mut self) -> bool {
+        loop {
+            let result = self.protov2d.try_reconnect().await;
+
+            if result.is_err() {
+                sleep(Duration::from_millis(5000)).await;
+                continue;
+            }
+
+            return result.unwrap();
+        }
+    }
+
+    pub async fn try_reconnect_protov2d_non_loop(&mut self) -> Result<bool, rs_protov2d::client::Error> {
         self.protov2d.try_reconnect().await
     }
 }
@@ -366,23 +386,24 @@ where
 pub struct DTSocketClientEventReceiverStream<T, R>
 where
     T: serde::de::DeserializeOwned,
-    R: IntoClientRequest + Unpin + Copy
+    R: IntoClientRequest + Unpin + Copy,
 {
     dt: *mut DTSocketClient<R>,
     receiver: Box<BroadcastStream<Vec<u8>>>,
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<T, R> Unpin for DTSocketClientEventReceiverStream<T, R> 
-where 
+impl<T, R> Unpin for DTSocketClientEventReceiverStream<T, R>
+where
     T: serde::de::DeserializeOwned,
-    R: IntoClientRequest + Unpin + Copy
-{}
+    R: IntoClientRequest + Unpin + Copy,
+{
+}
 
 impl<T, R> Stream for DTSocketClientEventReceiverStream<T, R>
 where
     T: serde::de::DeserializeOwned,
-    R: IntoClientRequest + Unpin + Copy
+    R: IntoClientRequest + Unpin + Copy,
 {
     type Item = T;
 
